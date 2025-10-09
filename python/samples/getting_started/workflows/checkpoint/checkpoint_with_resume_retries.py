@@ -4,6 +4,8 @@ import asyncio
 import os
 import random
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -60,16 +62,58 @@ Prerequisites:
 - Filesystem access for writing JSON checkpoint files in a temp directory.
 """
 
-# Define the temporary directory for storing checkpoints.
-# These files allow the workflow to be resumed later.
-DIR = os.path.dirname(__file__)
-TEMP_DIR = os.path.join(DIR, "tmp", "checkpoints")
-os.makedirs(TEMP_DIR, exist_ok=True)
-
 # Retry configuration
 MAX_RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 2.0
 FAILURE_PROBABILITY = 0.6  # 60% chance of failure to demonstrate retry logic
+
+
+def create_process_safe_checkpoint_storage() -> tuple[FileCheckpointStorage, str]:
+    """
+    Create a process-safe checkpoint storage with unique identifier.
+    Returns (checkpoint_storage, execution_id) for cleanup purposes.
+    """
+    # Generate unique execution identifier combining timestamp and UUID
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    process_id = os.getpid()
+    unique_id = str(uuid.uuid4())[:8]  # Short UUID for readability
+    execution_id = f"{timestamp}_pid{process_id}_{unique_id}"
+    
+    # Create process-specific checkpoint directory
+    base_dir = os.path.dirname(__file__)
+    checkpoint_base = os.path.join(base_dir, "tmp", "checkpoints")
+    process_checkpoint_dir = os.path.join(checkpoint_base, execution_id)
+    
+    # Ensure directory exists
+    os.makedirs(process_checkpoint_dir, exist_ok=True)
+    
+    print(f"🔐 Process-safe checkpoint storage: {execution_id}")
+    print(f"📁 Checkpoint directory: {process_checkpoint_dir}")
+    
+    return FileCheckpointStorage(storage_path=process_checkpoint_dir), execution_id
+
+
+def cleanup_checkpoint_storage(execution_id: str, success: bool) -> None:
+    """
+    Clean up checkpoint files after workflow completion.
+    Optionally preserve files for failed runs for debugging.
+    """
+    base_dir = os.path.dirname(__file__)
+    process_checkpoint_dir = os.path.join(base_dir, "tmp", "checkpoints", execution_id)
+    
+    if success:
+        # Remove successful run checkpoints to save space
+        try:
+            import shutil
+            if os.path.exists(process_checkpoint_dir):
+                shutil.rmtree(process_checkpoint_dir)
+                print(f"🧹 Cleaned up checkpoint directory: {execution_id}")
+        except Exception as e:
+            print(f"⚠️ Could not clean up checkpoints: {e}")
+    else:
+        # Preserve failed run checkpoints for debugging
+        print(f"🔍 Preserving checkpoint directory for debugging: {execution_id}")
+        print(f"   Location: {process_checkpoint_dir}")
 
 
 class SimulatedTransientError(Exception):
@@ -313,16 +357,10 @@ async def run_workflow_with_retries(
 
 
 async def main():
-    # Clear existing checkpoints in this sample directory for a clean run.
-    checkpoint_dir = Path(TEMP_DIR)
-    for file in checkpoint_dir.glob("*.json"):  # noqa: ASYNC240
-        file.unlink()
+    # Create process-safe checkpoint storage with unique execution ID
+    checkpoint_storage, execution_id = create_process_safe_checkpoint_storage()
 
-    # Backing store for checkpoints written by with_checkpointing.
-    checkpoint_storage = FileCheckpointStorage(storage_path=TEMP_DIR)
-
-    print(f"🎯 Checkpoint-based Retry Demo (Failure Rate: {FAILURE_PROBABILITY*100:.0f}%)")
-    print(f"📁 Checkpoints stored in: {TEMP_DIR}")
+    print(f"🎯 Multi-Process Safe Checkpoint-based Retry Demo (Failure Rate: {FAILURE_PROBABILITY*100:.0f}%)")
     
     # Run workflow with automatic retries
     success, all_checkpoints = await run_workflow_with_retries(checkpoint_storage)
