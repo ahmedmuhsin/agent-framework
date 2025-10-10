@@ -84,17 +84,20 @@ RETRY_BACKOFF_SECONDS = 2.0
 FAILURE_PROBABILITY = 0.6  # 60% chance of failure to demonstrate retry logic
 
 
-def create_process_safe_checkpoint_storage() -> tuple[FileCheckpointStorage, str]:
+def generate_execution_id() -> str:
     """
-    Create a process-safe checkpoint storage with unique identifier.
-    Returns (checkpoint_storage, execution_id) for cleanup purposes.
+    Generate a unique execution identifier combining timestamp, process ID, and UUID.
     """
-    # Generate unique execution identifier combining timestamp and UUID
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     process_id = os.getpid()
     unique_id = str(uuid.uuid4())[:8]  # Short UUID for readability
-    execution_id = f"{timestamp}_pid{process_id}_{unique_id}"
-    
+    return f"{timestamp}_pid{process_id}_{unique_id}"
+
+
+def create_process_safe_checkpoint_storage(execution_id: str) -> FileCheckpointStorage:
+    """
+    Create a process-safe checkpoint storage with the given execution identifier.
+    """
     # Create process-specific checkpoint directory
     base_dir = os.path.dirname(__file__)
     checkpoint_base = os.path.join(base_dir, "tmp", "checkpoints")
@@ -103,10 +106,10 @@ def create_process_safe_checkpoint_storage() -> tuple[FileCheckpointStorage, str
     # Ensure directory exists
     os.makedirs(process_checkpoint_dir, exist_ok=True)
     
-    print(f"🔐 Process-safe checkpoint storage: {execution_id}")
+    print(f"🔐 Process-safe file checkpoint storage")
     print(f"📁 Checkpoint directory: {process_checkpoint_dir}")
     
-    return FileCheckpointStorage(storage_path=process_checkpoint_dir), execution_id
+    return FileCheckpointStorage(storage_path=process_checkpoint_dir)
 
 
 def cleanup_checkpoint_storage(execution_id: str, success: bool) -> None:
@@ -130,6 +133,30 @@ def cleanup_checkpoint_storage(execution_id: str, success: bool) -> None:
         # Preserve failed run checkpoints for debugging
         print(f"🔍 Preserving checkpoint directory for debugging: {execution_id}")
         print(f"   Location: {process_checkpoint_dir}")
+
+
+async def cleanup_azure_checkpoint_storage(checkpoint_storage: Any, execution_id: str, success: bool) -> None:
+    """
+    Clean up Azure blob checkpoints after workflow completion.
+    Optionally preserve blobs for failed runs for debugging.
+    """
+    if success:
+        # Remove successful run checkpoints to save space
+        try:
+            checkpoints = await checkpoint_storage.list_checkpoints()
+            deleted_count = 0
+            for checkpoint in checkpoints:
+                success = await checkpoint_storage.delete_checkpoint(checkpoint.checkpoint_id)
+                if success:
+                    deleted_count += 1
+            print(f"🧹 Cleaned up {deleted_count} checkpoint blobs for execution: {execution_id}")
+        except Exception as e:
+            print(f"⚠️ Could not clean up checkpoint blobs: {e}")
+    else:
+        # Preserve failed run checkpoints for debugging
+        checkpoints = await checkpoint_storage.list_checkpoints()
+        print(f"🔍 Preserving {len(checkpoints)} checkpoint blobs for debugging: {execution_id}")
+        print(f"   Blobs with prefix: {execution_id}/")
 
 
 class SimulatedTransientError(Exception):
@@ -376,7 +403,11 @@ async def main():
     # Load environment variables from .env file
     load_dotenv()
     
-    # Create process-safe checkpoint storage with unique execution ID
+    # Generate unique execution identifier for process isolation
+    execution_id = generate_execution_id()
+    print(f"🔐 Execution ID: {execution_id}")
+    
+    # Create checkpoint storage based on configuration
     use_azure = os.getenv("USE_AZURE_BLOB", "0") == "1"
 
     if use_azure:
@@ -387,14 +418,14 @@ async def main():
         if not conn_str:
             raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING must be set to use Azure Blob storage")
         
-        print(f"🔐 Using Azure Blob Storage for checkpointing")
-        print(f"📡 Connection: {conn_str[:50]}...")
+        print(f"� Using Azure Blob Storage for checkpointing")
+        print(f" Connection: {conn_str[:50]}...")
         
-        # Use a container per process to isolate checkpoints; include execution_id
-        checkpoint_storage = AzureBlobCheckpointStorage(conn_str)
-        execution_id = None
+        # Use execution_id as blob prefix to isolate checkpoints per process
+        checkpoint_storage = AzureBlobCheckpointStorage(conn_str, execution_prefix=execution_id)
     else:
-        checkpoint_storage, execution_id = create_process_safe_checkpoint_storage()
+        print(f"📁 Using local file storage for checkpointing")
+        checkpoint_storage = create_process_safe_checkpoint_storage(execution_id)
 
     print(f"🎯 Multi-Process Safe Checkpoint-based Retry Demo (Failure Rate: {FAILURE_PROBABILITY*100:.0f}%)")
     
@@ -433,6 +464,23 @@ async def main():
         print("⚠️ No checkpoints were created")
     
     print(f"{'='*60}")
+    
+    # Clean up checkpoint storage based on success/failure (optional)
+    auto_cleanup = os.getenv("AUTO_CLEANUP_CHECKPOINTS", "0") == "1"
+    if auto_cleanup:
+        print("🧹 Auto-cleanup enabled...")
+        if use_azure:
+            await cleanup_azure_checkpoint_storage(checkpoint_storage, execution_id, success)
+        else:
+            cleanup_checkpoint_storage(execution_id, success)
+    else:
+        print("ℹ️ Auto-cleanup disabled. Checkpoints preserved.")
+        if use_azure:
+            checkpoints = await checkpoint_storage.list_checkpoints()
+            print(f"   Azure blobs with prefix '{execution_id}': {len(checkpoints)} checkpoints")
+        else:
+            print(f"   Local directory: {execution_id}")
+        print("   Set AUTO_CLEANUP_CHECKPOINTS=1 to enable automatic cleanup.")
 
     """
     Sample Output:

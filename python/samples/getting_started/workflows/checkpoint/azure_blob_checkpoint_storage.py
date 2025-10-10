@@ -19,9 +19,10 @@ class AzureBlobCheckpointStorage:
     can be used interchangeably by the workflow sample.
     """
 
-    def __init__(self, connection_string: str, container_name: str = "checkpoints") -> None:
+    def __init__(self, connection_string: str, container_name: str = "checkpoints", execution_prefix: str = "") -> None:
         self._client = BlobServiceClient.from_connection_string(connection_string)
         self._container_name = container_name
+        self._execution_prefix = execution_prefix + "/" if execution_prefix else ""
         self._container_client = self._client.get_container_client(container_name)
         try:
             self._container_client.create_container()
@@ -31,7 +32,7 @@ class AzureBlobCheckpointStorage:
             pass
 
     async def save_checkpoint(self, checkpoint: WorkflowCheckpoint) -> str:
-        blob_name = f"{checkpoint.checkpoint_id}.json"
+        blob_name = f"{self._execution_prefix}{checkpoint.checkpoint_id}.json"
         data = json.dumps(checkpoint.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
 
         def _upload():
@@ -43,7 +44,7 @@ class AzureBlobCheckpointStorage:
         return checkpoint.checkpoint_id
 
     async def load_checkpoint(self, checkpoint_id: str) -> WorkflowCheckpoint | None:
-        blob_name = f"{checkpoint_id}.json"
+        blob_name = f"{self._execution_prefix}{checkpoint_id}.json"
 
         def _download() -> bytes | None:
             try:
@@ -64,7 +65,7 @@ class AzureBlobCheckpointStorage:
     async def list_checkpoint_ids(self, workflow_id: str | None = None) -> list[str]:
         def _list() -> list[str]:
             ids: list[str] = []
-            for b in self._container_client.list_blobs(name_starts_with=""):
+            for b in self._container_client.list_blobs(name_starts_with=self._execution_prefix):
                 if not b.name.endswith(".json"):
                     continue
                 try:
@@ -82,7 +83,7 @@ class AzureBlobCheckpointStorage:
     async def list_checkpoints(self, workflow_id: str | None = None) -> list[WorkflowCheckpoint]:
         def _list() -> list[WorkflowCheckpoint]:
             cps: list[WorkflowCheckpoint] = []
-            for b in self._container_client.list_blobs(name_starts_with=""):
+            for b in self._container_client.list_blobs(name_starts_with=self._execution_prefix):
                 if not b.name.endswith(".json"):
                     continue
                 try:
@@ -98,7 +99,7 @@ class AzureBlobCheckpointStorage:
         return await asyncio.to_thread(_list)
 
     async def delete_checkpoint(self, checkpoint_id: str) -> bool:
-        blob_name = f"{checkpoint_id}.json"
+        blob_name = f"{self._execution_prefix}{checkpoint_id}.json"
 
         def _delete() -> bool:
             try:
