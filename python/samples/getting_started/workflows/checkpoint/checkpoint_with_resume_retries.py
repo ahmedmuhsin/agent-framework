@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from dotenv import load_dotenv
+
 from agent_framework import (
     AgentExecutor,
     AgentExecutorRequest,
@@ -24,6 +26,20 @@ from agent_framework import (
 )
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import AzureCliCredential
+
+# Optional: Azure Blob checkpoint storage
+try:
+    import sys
+    from pathlib import Path
+    # Add the checkpoint directory to sys.path to import the azure storage module
+    checkpoint_dir = Path(__file__).parent
+    if str(checkpoint_dir) not in sys.path:
+        sys.path.insert(0, str(checkpoint_dir))
+    from azure_blob_checkpoint_storage import AzureBlobCheckpointStorage  # type: ignore
+except ImportError as e:
+    print(f"Warning: Could not import AzureBlobCheckpointStorage: {e}")
+    AzureBlobCheckpointStorage = None
+
 from agent_framework.devui import serve
 if TYPE_CHECKING:
     from agent_framework import Workflow
@@ -357,8 +373,28 @@ async def run_workflow_with_retries(
 
 
 async def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    
     # Create process-safe checkpoint storage with unique execution ID
-    checkpoint_storage, execution_id = create_process_safe_checkpoint_storage()
+    use_azure = os.getenv("USE_AZURE_BLOB", "0") == "1"
+
+    if use_azure:
+        if AzureBlobCheckpointStorage is None:
+            raise RuntimeError("AzureBlobCheckpointStorage not available. Install azure-storage-blob package.")
+        
+        conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        if not conn_str:
+            raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING must be set to use Azure Blob storage")
+        
+        print(f"🔐 Using Azure Blob Storage for checkpointing")
+        print(f"📡 Connection: {conn_str[:50]}...")
+        
+        # Use a container per process to isolate checkpoints; include execution_id
+        checkpoint_storage = AzureBlobCheckpointStorage(conn_str)
+        execution_id = None
+    else:
+        checkpoint_storage, execution_id = create_process_safe_checkpoint_storage()
 
     print(f"🎯 Multi-Process Safe Checkpoint-based Retry Demo (Failure Rate: {FAILURE_PROBABILITY*100:.0f}%)")
     
